@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pocket-codex"
-version = "0.1.0"
+version = "0.3.0"
 description = "A compact Codex TUI for very small terminals"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["openai-codex", "textual>=8.2,<9"]
 
 [project.scripts]
-pocket-codex = "pocket_codex.tui:main"
+pocket-codex = "pocket_codex.ascii_tui:main"
+pocket-codex-ascii = "pocket_codex.ascii_tui:main"
+pocket-codex-textual = "pocket_codex.tui:main"
 
 [tool.setuptools.packages.find]
 include = ["pocket_codex*"]

@@ -1,12 +1,26 @@
 # Pocket Codex
 
-Responsive Codex chat for terminals, including 240x320 displays. It keeps the
-agent capabilities in the official Python SDK while showing only prompts, final
-answers, errors, and a compact animated activity indicator.
+Compact Codex clients for terminals, including 240x320 displays. Both clients
+use the official Python SDK while hiding reasoning logs and showing prompts,
+final answers, errors, and a compact activity indicator.
 
-The Textual interface includes Markdown messages, a model picker, persistent
-Codex conversation history, and a responsive sidebar. On narrow terminals the
-sidebar becomes a drawer so the chat keeps the full display width.
+## Interfaces
+
+The default v3 is a full-ASCII `curses` interface designed for small or limited
+terminals:
+
+```bash
+pocket-codex /path/to/project
+# Same interface under an explicit name:
+pocket-codex-ascii /path/to/project
+```
+
+The previous Textual interface remains available with Markdown, a model picker,
+and a conversation sidebar:
+
+```bash
+pocket-codex-textual /path/to/project
+```
 
 ## Install
 
@@ -23,7 +37,16 @@ pocket-codex /path/to/project
 The SDK reuses the current Codex authentication. To authenticate separately,
 run `codex login` before starting Pocket Codex.
 
-## Keys
+## ASCII keys
+
+- `Enter`: send
+- `Ctrl-C`: interrupt the active turn; quit when idle
+- `Ctrl-L`: clear visible messages
+- `Ctrl-U`: clear input before the cursor
+- `Up` / `Down`: prompt history
+- `Page Up` / `Page Down`: scroll
+
+## Textual keys
 
 - `Enter`: send; `Shift-Enter` inserts a line break
 - `Ctrl-Enter`: send
@@ -53,6 +76,7 @@ run `codex login` before starting Pocket Codex.
 /quit                     exit
 ```
 
-The sidebar model picker changes the model used by subsequent turns. Pocket
-Codex defaults to `workspace_write` and `medium` reasoning effort. The SDK is
-currently beta, so its public API can change before version 1.0.
+The Textual sidebar model picker and the ASCII `/model` command change the model
+used by subsequent turns. Pocket Codex defaults to `workspace_write` and
+`medium` reasoning effort. The SDK is currently beta, so its public API can
+change before version 1.0.
