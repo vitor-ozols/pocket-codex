@@ -48,6 +48,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.screen.has_class("sidebar-open"))
             self.assertIsInstance(app.focused, ListView)
 
+            await pilot.press("tab")
+            self.assertFalse(app.screen.has_class("sidebar-open"))
+            self.assertIsInstance(app.focused, Composer)
+
             composer = app.query_one("#prompt", Composer)
             composer.load_text("hello")
             composer.focus()

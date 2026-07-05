@@ -80,8 +80,8 @@ class PocketCodexApp(App[None]):
 
     CSS = """
     Screen {
-        background: #f2efe6;
-        color: #20312d;
+        background: #0d1715;
+        color: #dce8e3;
         layers: base overlay;
     }
 
@@ -93,10 +93,10 @@ class PocketCodexApp(App[None]):
     #sidebar {
         width: 32;
         height: 100%;
-        background: #123b36;
-        color: #f8f3e7;
+        background: #0a2420;
+        color: #e8f1ed;
         padding: 1;
-        border-right: tall #0c2c28;
+        border-right: tall #244a43;
     }
 
     #brand {
@@ -111,7 +111,7 @@ class PocketCodexApp(App[None]):
         width: 100%;
         margin-bottom: 1;
         background: #e86f51;
-        color: #fffaf0;
+        color: #fff8e8;
         border: none;
         text-style: bold;
     }
@@ -119,15 +119,15 @@ class PocketCodexApp(App[None]):
     .side-label {
         height: 1;
         margin: 1 1 0 1;
-        color: #9fc6bd;
+        color: #8dbab0;
         text-style: bold;
     }
 
     #model-select {
         width: 100%;
         margin-top: 1;
-        background: #1b514a;
-        color: #fffaf0;
+        background: #123d37;
+        color: #edf6f2;
         border: tall #39766d;
     }
 
@@ -143,37 +143,37 @@ class PocketCodexApp(App[None]):
         min-height: 2;
         padding: 0 1;
         margin-bottom: 1;
-        color: #e6eee9;
+        color: #d8e7e1;
         background: transparent;
     }
 
     #thread-list ListItem:hover {
-        background: #1b514a;
+        background: #164941;
     }
 
     #thread-list ListItem.--highlight {
         background: #f6c453;
-        color: #17352f;
+        color: #10231f;
         text-style: bold;
     }
 
     #side-hint {
         height: 2;
-        color: #9fc6bd;
+        color: #8dbab0;
         padding: 0 1;
     }
 
     #main {
         width: 1fr;
         height: 100%;
-        background: #f2efe6;
+        background: #0d1715;
     }
 
     #topbar {
         height: 3;
         padding: 0 1;
-        background: #fffdf7;
-        border-bottom: solid #d8d1c2;
+        background: #14211f;
+        border-bottom: solid #2e4540;
         align-vertical: middle;
     }
 
@@ -184,7 +184,7 @@ class PocketCodexApp(App[None]):
         padding: 0;
         margin-right: 1;
         background: transparent;
-        color: #123b36;
+        color: #9fd3c7;
         border: none;
     }
 
@@ -192,30 +192,30 @@ class PocketCodexApp(App[None]):
         width: 1fr;
         height: 1;
         text-style: bold;
-        color: #123b36;
+        color: #dce8e3;
     }
 
     #status {
         width: auto;
         height: 1;
-        color: #39766d;
+        color: #68b5a5;
         text-style: bold;
     }
 
     #chat {
         height: 1fr;
         padding: 1 2;
-        scrollbar-color: #c1b9a8;
-        scrollbar-background: #f2efe6;
+        scrollbar-color: #365b54;
+        scrollbar-background: #0d1715;
     }
 
     #welcome {
         height: auto;
         padding: 2;
         margin: 1 2;
-        background: #fffdf7;
-        border: round #d8d1c2;
-        color: #46605a;
+        background: #14211f;
+        border: round #2e4540;
+        color: #9fb7b1;
         content-align: center middle;
     }
 
@@ -224,41 +224,41 @@ class PocketCodexApp(App[None]):
         height: auto;
         padding: 1 2;
         margin-bottom: 1;
-        border: round #d8d1c2;
+        border: round #2e4540;
     }
 
     .message.user {
         margin-left: 4;
-        background: #f8d8bc;
-        border: round #e8a878;
+        background: #3d261f;
+        border: round #9f513d;
     }
 
     .message.assistant {
-        background: #fffdf7;
-        border: round #c9d8d2;
+        background: #14211f;
+        border: round #31534c;
     }
 
     .message-label {
         height: 1;
-        color: #39766d;
+        color: #68b5a5;
         text-style: bold;
     }
 
     .message.user .message-label {
-        color: #a1442e;
+        color: #ef967f;
     }
 
     .message Markdown {
         height: auto;
         background: transparent;
-        color: #20312d;
+        color: #dce8e3;
         padding: 0;
     }
 
     #thinking {
         height: 2;
         margin: 0 3;
-        color: #39766d;
+        color: #68b5a5;
         text-style: italic;
     }
 
@@ -269,16 +269,16 @@ class PocketCodexApp(App[None]):
     #composer-bar {
         height: 7;
         padding: 0 2 1 2;
-        background: #f2efe6;
+        background: #0d1715;
         align-vertical: bottom;
     }
 
     #prompt {
         width: 1fr;
         height: 6;
-        background: #fffdf7;
-        color: #20312d;
-        border: round #8ba79f;
+        background: #14211f;
+        color: #dce8e3;
+        border: round #416e65;
         scrollbar-size: 0 0;
     }
 
@@ -292,7 +292,7 @@ class PocketCodexApp(App[None]):
         height: 3;
         margin-left: 1;
         background: #123b36;
-        color: #fffdf7;
+        color: #fff8e8;
         border: none;
         text-style: bold;
     }
@@ -329,6 +329,7 @@ class PocketCodexApp(App[None]):
     BINDINGS = [
         Binding("ctrl+n", "new_chat", "New", show=True),
         Binding("ctrl+b", "toggle_sidebar", "History", show=True),
+        Binding("tab", "switch_panel", "Panel", show=True, priority=True),
         Binding("ctrl+enter", "send", "Send", show=False),
         Binding("ctrl+c", "stop", "Stop", show=False, priority=True),
         Binding("escape", "close_sidebar", "Close", show=False),
@@ -351,7 +352,7 @@ class PocketCodexApp(App[None]):
                 yield Select([], prompt="Loading models...", id="model-select")
                 yield Static("CONVERSATIONS", classes="side-label")
                 yield ListView(id="thread-list")
-                yield Static("Ctrl+B history\nCtrl+C stop", id="side-hint")
+                yield Static("Tab switch panel\nCtrl+C stop", id="side-hint")
             with Vertical(id="main"):
                 with Horizontal(id="topbar"):
                     yield Button("[=]", id="menu", compact=True)
@@ -571,6 +572,12 @@ class PocketCodexApp(App[None]):
                 self.query_one("#thread-list", ListView).focus()
             else:
                 self.query_one("#prompt", Composer).focus()
+
+    def action_switch_panel(self) -> None:
+        if self.screen.has_class("narrow"):
+            self.action_toggle_sidebar()
+        else:
+            self.screen.focus_next()
 
     def action_close_sidebar(self) -> None:
         self.screen.remove_class("sidebar-open")

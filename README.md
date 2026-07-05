@@ -29,6 +29,7 @@ run `codex login` before starting Pocket Codex.
 - `Ctrl-Enter`: send
 - `Ctrl-N`: new conversation
 - `Ctrl-B`: show or hide conversation history
+- `Tab`: switch between chat and sidebar on narrow screens
 - `Ctrl-C`: interrupt the active turn; quit when idle
 - `Escape`: close the history drawer
 
