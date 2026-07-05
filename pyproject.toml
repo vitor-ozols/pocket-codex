@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A compact Codex TUI for very small terminals"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["openai-codex"]
+dependencies = ["openai-codex", "textual>=8.2,<9"]
 
 [project.scripts]
 pocket-codex = "pocket_codex.tui:main"

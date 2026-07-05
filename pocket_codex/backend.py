@@ -14,6 +14,7 @@ from .commands import Command
 class Event:
     kind: str
     text: str = ""
+    data: Any = None
 
 
 class CodexWorker:
@@ -164,19 +165,30 @@ class CodexWorker:
             kwargs["model"] = self.model
         self._thread = self._client.thread_resume(thread_id, **kwargs)
         self.events.put(Event("thread", str(self._thread.id)))
+        response = self._thread.read(include_turns=True)
+        self.events.put(
+            Event(
+                "history",
+                data={
+                    "id": str(self._thread.id),
+                    "messages": _history_messages(response),
+                },
+            )
+        )
 
     def _cmd_threads(self, _: str) -> None:
         response = self._client.thread_list(cwd=self.cwd, limit=12)
         rows = _items(response, "data", "threads", "items")
         if not rows:
-            self.events.put(Event("info", "No threads found."))
+            self.events.put(Event("threads", data=[]))
             return
-        lines = []
+        threads = []
         for row in rows:
             thread_id = str(_value(row, "id", "thread_id", default="?"))
-            name = str(_value(row, "name", "title", "preview", default=""))
-            lines.append(f"{thread_id} {name}".rstrip())
-        self.events.put(Event("info", "\n".join(lines)))
+            name = str(_value(row, "name", "title", "preview", default="Untitled"))
+            name = " ".join(name.split())[:48] or "Untitled"
+            threads.append({"id": thread_id, "name": name})
+        self.events.put(Event("threads", data=threads))
 
     def _cmd_name(self, name: str) -> None:
         if not name:
@@ -198,8 +210,17 @@ class CodexWorker:
     def _cmd_models(self, _: str) -> None:
         response = self._client.models()
         rows = _items(response, "data", "models", "items")
-        names = [str(_value(row, "id", "model", "slug", default=row)) for row in rows]
-        self.events.put(Event("info", "\n".join(names) or "No models returned."))
+        models = []
+        for row in rows:
+            model_id = str(_value(row, "id", "model", "slug", default=row))
+            models.append(
+                {
+                    "id": model_id,
+                    "name": str(_value(row, "display_name", default=model_id)),
+                    "default": bool(_value(row, "is_default", default=False)),
+                }
+            )
+        self.events.put(Event("models", data=models))
 
     def _cmd_effort(self, effort: str) -> None:
         if effort not in {"low", "medium", "high"}:
@@ -249,3 +270,26 @@ def _items(obj: Any, *names: str) -> list[Any]:
         return obj
     value = _value(obj, *names, default=[])
     return list(value or [])
+
+
+def _history_messages(response: Any) -> list[dict[str, str]]:
+    dumped = response.model_dump() if hasattr(response, "model_dump") else response
+    thread = _value(dumped, "thread", default=dumped)
+    messages: list[dict[str, str]] = []
+    for turn in _items(thread, "turns"):
+        for item in _items(turn, "items"):
+            kind = _value(item, "type")
+            if kind == "userMessage":
+                chunks = []
+                for content in _items(item, "content"):
+                    text = _value(content, "text")
+                    if text:
+                        chunks.append(str(text))
+                if chunks:
+                    messages.append({"role": "user", "text": "\n".join(chunks)})
+            elif kind == "agentMessage":
+                phase = str(_value(item, "phase", default=""))
+                text = _value(item, "text")
+                if phase.endswith("final_answer") and text:
+                    messages.append({"role": "assistant", "text": str(text)})
+    return messages

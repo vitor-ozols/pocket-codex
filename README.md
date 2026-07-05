@@ -1,8 +1,12 @@
 # Pocket Codex
 
-Minimal Codex TUI for small terminals, including 240x320 displays. It keeps the
+Responsive Codex chat for terminals, including 240x320 displays. It keeps the
 agent capabilities in the official Python SDK while showing only prompts, final
-answers, errors, and a compact activity indicator.
+answers, errors, and a compact animated activity indicator.
+
+The Textual interface includes Markdown messages, a model picker, persistent
+Codex conversation history, and a responsive sidebar. On narrow terminals the
+sidebar becomes a drawer so the chat keeps the full display width.
 
 ## Install
 
@@ -21,11 +25,12 @@ run `codex login` before starting Pocket Codex.
 
 ## Keys
 
-- `Enter`: send
+- `Enter`: send; `Shift-Enter` inserts a line break
+- `Ctrl-Enter`: send
+- `Ctrl-N`: new conversation
+- `Ctrl-B`: show or hide conversation history
 - `Ctrl-C`: interrupt the active turn; quit when idle
-- `Ctrl-L`: clear the visible conversation
-- `Page Up` / `Page Down`: scroll
-- `Up` / `Down`: prompt history
+- `Escape`: close the history drawer
 
 ## Commands
 
@@ -47,7 +52,6 @@ run `codex login` before starting Pocket Codex.
 /quit                     exit
 ```
 
-Pocket Codex defaults to `workspace_write`, leaves model selection to the Codex
-configuration, and uses `medium` reasoning effort. The SDK is currently beta,
-so its public API can change before version 1.0.
-
+The sidebar model picker changes the model used by subsequent turns. Pocket
+Codex defaults to `workspace_write` and `medium` reasoning effort. The SDK is
+currently beta, so its public API can change before version 1.0.
