@@ -134,7 +134,7 @@ class TerminalMode:
 class AsciiTUI:
     MAX_MESSAGES = 200
 
-    def __init__(self, cwd: str) -> None:
+    def __init__(self, cwd: str, resume_thread_id: str = "", program_name: str = "pocket-codex") -> None:
         self.agent = CodexWorker(cwd)
         self.messages = [Message("info", "Pocket Codex ASCII v4. /help for commands.")]
         self.input = ""
@@ -153,17 +153,26 @@ class AsciiTUI:
         self.threads: list[dict[str, str]] = []
         self.model_index = 0
         self.thread_index = 0
+        self.resume_thread_id = resume_thread_id
+        self.program_name = program_name
+        self.exit_message = ""
 
     def run(self) -> None:
         self.agent.start()
         with TerminalMode():
             try:
+                if self.resume_thread_id:
+                    if not self.agent.command(Command("resume", self.resume_thread_id)):
+                        self._append("error", "Failed to resume initial session.")
                 while self.running:
                     self._drain_events()
                     self._draw()
                     self._read_keys(timeout=0.09)
+            except KeyboardInterrupt:
+                self._request_exit()
             finally:
                 self.agent.close()
+        self._print_exit_message()
 
     def _drain_events(self) -> None:
         while True:
@@ -486,7 +495,7 @@ class AsciiTUI:
             self._scroll(-1)
         elif key == "\x03":
             if not self.agent.interrupt():
-                self.running = False
+                self._request_exit()
         elif key == "\x0c":
             self.messages.clear()
             self.scroll = 0
@@ -538,6 +547,10 @@ class AsciiTUI:
         else:
             self.scroll = max(0, self.scroll - amount)
 
+    def _request_exit(self) -> None:
+        self.exit_message = self._resume_hint()
+        self.running = False
+
     def _submit(self) -> None:
         text = self.input.strip()
         if not text:
@@ -587,15 +600,54 @@ class AsciiTUI:
         )
         self.cursor = len(self.input)
 
+    def _resume_hint(self) -> str:
+        thread_id = self.thread_id.strip()
+        if not thread_id or thread_id in {"new", "new thread"}:
+            return "Pocket Codex closed."
+        return (
+            f"Pocket Codex closed.\n"
+            f"Session ID: {thread_id}\n"
+            f"Resume with: {self.program_name} resume {thread_id}"
+        )
 
-def main() -> None:
+    def _print_exit_message(self) -> None:
+        message = self.exit_message or self._resume_hint()
+        if message:
+            sys.stdout.write(message + "\n")
+            sys.stdout.flush()
+
+
+def parse_cli_args(argv: list[str] | None = None) -> tuple[str, str]:
     parser = argparse.ArgumentParser(description="Pocket Codex ASCII v4")
-    parser.add_argument("cwd", nargs="?", default=".", help="agent working directory")
-    args = parser.parse_args()
-    cwd = str(Path(args.cwd).expanduser().resolve())
+    parser.add_argument(
+        "args",
+        nargs="*",
+        help="either [cwd] or: resume THREAD_ID [cwd]",
+    )
+    args = parser.parse_args(argv)
+    if not args.args:
+        cwd_arg = "."
+        resume_thread_id = ""
+    elif args.args[0] == "resume":
+        if len(args.args) < 2:
+            parser.error("usage: pocket-codex resume THREAD_ID [cwd]")
+        resume_thread_id = args.args[1]
+        cwd_arg = args.args[2] if len(args.args) > 2 else "."
+    elif len(args.args) == 1:
+        cwd_arg = args.args[0]
+        resume_thread_id = ""
+    else:
+        parser.error("usage: pocket-codex [cwd] OR pocket-codex resume THREAD_ID [cwd]")
+    cwd = str(Path(cwd_arg).expanduser().resolve())
     if not Path(cwd).is_dir():
         parser.error(f"not a directory: {cwd}")
-    AsciiTUI(cwd).run()
+    return cwd, resume_thread_id
+
+
+def main(argv: list[str] | None = None) -> None:
+    cwd, resume_thread_id = parse_cli_args(argv)
+    program_name = Path(sys.argv[0]).name or "pocket-codex"
+    AsciiTUI(cwd, resume_thread_id=resume_thread_id, program_name=program_name).run()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from pocket_codex.ascii_tui import (
     colorize,
     content_left,
     next_panel,
+    parse_cli_args,
     wrap_messages,
 )
 
@@ -62,6 +63,19 @@ class AsciiTuiTests(unittest.TestCase):
         self.assertEqual(entries[0]["kind"], "combo")
         self.assertEqual(entries[0]["value"], "gpt-test::low")
         self.assertEqual(entries[-1]["value"], "gpt-test::high")
+
+    def test_parse_cli_args_supports_resume_syntax(self) -> None:
+        cwd, thread_id = parse_cli_args(["resume", "abc-123", "."])
+        self.assertEqual(thread_id, "abc-123")
+        self.assertTrue(cwd.endswith("/mnt/sata/pocket-codex"))
+
+    def test_resume_hint_includes_command(self) -> None:
+        tui = AsciiTUI(".", program_name="pcodex")
+        tui.thread_id = "abc-123"
+        self.assertEqual(
+            tui._resume_hint(),
+            "Pocket Codex closed.\nSession ID: abc-123\nResume with: pcodex resume abc-123",
+        )
 
 
 if __name__ == "__main__":
