@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import curses
+import os
 import queue
+import select
+import shutil
+import sys
+import termios
 import textwrap
 import time
+import tty
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +31,20 @@ PREFIXES = {
     "error": "! ",
     "info": "# ",
 }
+
+LEFT_PAD = 4
+FRAME_PREFIX = " "
+ANSI_RESET = "\x1b[0m"
+ANSI_COLORS = {
+    "user": "\x1b[32m",
+    "assistant": "\x1b[36m",
+    "error": "\x1b[31m",
+    "info": "\x1b[33m",
+    "header": "\x1b[37m",
+    "divider": "\x1b[90m",
+}
+PANELS = ("chat", "models", "threads")
+EFFORTS = ("low", "medium", "high")
 
 
 def ascii_only(value: Any) -> str:
@@ -73,13 +92,51 @@ def wrap_messages(messages: list[Message], width: int) -> list[tuple[str, str]]:
     return output
 
 
+def content_left(width: int) -> int:
+    return min(LEFT_PAD, max(2, width // 6))
+
+
+def colorize(text: str, role: str) -> str:
+    color = ANSI_COLORS.get(role, "")
+    if not color or not text:
+        return text
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def next_panel(panel: str) -> str:
+    try:
+        index = PANELS.index(panel)
+    except ValueError:
+        return "chat"
+    return PANELS[(index + 1) % len(PANELS)]
+
+
+class TerminalMode:
+    def __init__(self) -> None:
+        self.fd = sys.stdin.fileno()
+        self._saved: list[Any] | None = None
+
+    def __enter__(self) -> TerminalMode:
+        if sys.stdin.isatty():
+            self._saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        sys.stdout.write("\x1b[?25l\x1b[2J\x1b[H")
+        sys.stdout.flush()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._saved is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self._saved)
+        sys.stdout.write("\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
+        sys.stdout.flush()
+
+
 class AsciiTUI:
     MAX_MESSAGES = 200
 
-    def __init__(self, screen: curses.window, cwd: str) -> None:
-        self.screen = screen
+    def __init__(self, cwd: str) -> None:
         self.agent = CodexWorker(cwd)
-        self.messages = [Message("info", "Pocket Codex ASCII v3. /help for commands.")]
+        self.messages = [Message("info", "Pocket Codex ASCII v4. /help for commands.")]
         self.input = ""
         self.cursor = 0
         self.prompt_history: list[str] = []
@@ -88,34 +145,25 @@ class AsciiTUI:
         self.status = "starting"
         self.thread_id = "new"
         self.running = True
+        self._buffer = ""
+        self._last_frame: list[str] = []
+        self._last_size = (0, 0)
+        self.panel = "chat"
+        self.models: list[dict[str, Any]] = []
+        self.threads: list[dict[str, str]] = []
+        self.model_index = 0
+        self.thread_index = 0
 
     def run(self) -> None:
-        self._setup()
         self.agent.start()
-        try:
-            while self.running:
-                self._drain_events()
-                self._draw()
-                try:
-                    key = self.screen.get_wch()
-                except curses.error:
-                    continue
-                except KeyboardInterrupt:
-                    if not self.agent.interrupt():
-                        self.running = False
-                    continue
-                self._key(key)
-        finally:
-            self.agent.close()
-
-    def _setup(self) -> None:
-        curses.curs_set(1)
-        self.screen.timeout(90)
-        self.screen.keypad(True)
-        try:
-            curses.use_default_colors()
-        except curses.error:
-            pass
+        with TerminalMode():
+            try:
+                while self.running:
+                    self._drain_events()
+                    self._draw()
+                    self._read_keys(timeout=0.09)
+            finally:
+                self.agent.close()
 
     def _drain_events(self) -> None:
         while True:
@@ -154,8 +202,14 @@ class AsciiTUI:
             del self.messages[: -self.MAX_MESSAGES]
 
     def _show_models(self, models: list[dict[str, Any]]) -> None:
+        self.models = models
+        self.model_index = min(self.model_index, max(0, len(self._model_menu_entries()) - 1))
         if not models:
-            self._append("info", "No models found.")
+            if self.panel == "chat":
+                self._append("info", "No models found.")
+            return
+        if self.panel != "chat":
+            self.scroll = 0
             return
         lines = ["Models:"]
         for model in models:
@@ -165,8 +219,14 @@ class AsciiTUI:
         self.scroll = 0
 
     def _show_threads(self, threads: list[dict[str, str]]) -> None:
+        self.threads = threads
+        self.thread_index = min(self.thread_index, max(0, len(threads) - 1))
         if not threads:
-            self._append("info", "No conversations found.")
+            if self.panel == "chat":
+                self._append("info", "No conversations found.")
+            return
+        if self.panel != "chat":
+            self.scroll = 0
             return
         lines = ["Conversations:"]
         lines.extend(f"{item['id']}  {item['name']}" for item in threads)
@@ -186,84 +246,244 @@ class AsciiTUI:
     def _thinking_status(self) -> str:
         if not self.agent.busy and self.status not in {"thinking", "interrupting"}:
             return self.status
-        if self.status == "interrupting":
-            word = "stopping"
-        else:
-            word = "thinking"
+        word = "stopping" if self.status == "interrupting" else "thinking"
         dots = "." * (int(time.monotonic() * 3) % 4)
         return word + dots
 
-    def _draw(self) -> None:
-        self.screen.erase()
-        height, width = self.screen.getmaxyx()
-        if height < 5 or width < 12:
-            self._put(0, 0, "Terminal too small", max(1, width - 1))
-            self.screen.refresh()
+    def _read_keys(self, timeout: float) -> None:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
             return
+        chunk = os.read(sys.stdin.fileno(), 64).decode("utf-8", "ignore")
+        if not chunk:
+            self.running = False
+            return
+        self._buffer += chunk
+        while True:
+            key = self._pop_key()
+            if key is None:
+                return
+            self._key(key)
+
+    def _pop_key(self) -> str | None:
+        if not self._buffer:
+            return None
+        if self._buffer.startswith("\x1b["):
+            for seq, name in (
+                ("\x1b[A", "UP"),
+                ("\x1b[B", "DOWN"),
+                ("\x1b[C", "RIGHT"),
+                ("\x1b[D", "LEFT"),
+                ("\x1b[H", "HOME"),
+                ("\x1b[F", "END"),
+                ("\x1b[3~", "DELETE"),
+                ("\x1b[5~", "PGUP"),
+                ("\x1b[6~", "PGDN"),
+                ("\x1b[59;5u", "CTRL_SEMI"),
+                ("\x1b[46;5u", "CTRL_DOT"),
+                ("\x1b[27;5;59~", "CTRL_SEMI"),
+                ("\x1b[27;5;46~", "CTRL_DOT"),
+            ):
+                if self._buffer.startswith(seq):
+                    self._buffer = self._buffer[len(seq) :]
+                    return name
+            if self._buffer in {"\x1b", "\x1b["}:
+                return None
+            self._buffer = self._buffer[1:]
+            return "ESC"
+        key = self._buffer[0]
+        self._buffer = self._buffer[1:]
+        return key
+
+    def _draw(self) -> None:
+        width, height = shutil.get_terminal_size((80, 24))
+        if height < 5 or width < 12:
+            self._render_frame(["Terminal too small".ljust(max(1, width))], width, height)
+            return
+
+        left_pad = content_left(width)
+        line_prefix = FRAME_PREFIX * left_pad
+        content_width = max(1, width - left_pad)
 
         cwd = Path(self.agent.cwd).name or "/"
         model = self.agent.model or "default"
         header = f"[pcodex] {cwd} | {model} | {self._thinking_status()}"
-        self._put(0, 0, header, width - 1, curses.A_REVERSE)
 
         body_height = height - 3
-        lines = wrap_messages(self.messages, width - 1)
+        visible_lines = self._body_lines(content_width, body_height)
+
+        frame: list[str] = [self._line(line_prefix, header, content_width, "header")]
+        for role, line in visible_lines:
+            frame.append(self._line(line_prefix, line, content_width, role))
+
+        while len(frame) < height - 2:
+            frame.append(self._line(line_prefix, "", content_width))
+
+        hint = self._hint()
+        divider = ("-" * content_width)[: max(0, content_width - len(hint))] + hint
+        frame.append(self._line(line_prefix, divider, content_width, "divider"))
+        prompt_role = "user" if self.panel == "chat" else "info"
+        frame.append(self._line(line_prefix, self._prompt_line(content_width), content_width, prompt_role))
+
+        self._render_frame(frame[:height], width, height)
+
+    def _render_frame(self, frame: list[str], width: int, height: int) -> None:
+        size = (width, height)
+        output: list[str] = []
+        if size != self._last_size:
+            output.append("\x1b[2J")
+            self._last_frame = []
+            self._last_size = size
+
+        max_rows = max(len(frame), len(self._last_frame))
+        for row in range(max_rows):
+            new_line = frame[row] if row < len(frame) else ""
+            old_line = self._last_frame[row] if row < len(self._last_frame) else None
+            if new_line == old_line:
+                continue
+            output.append(f"\x1b[{row + 1};1H{new_line}\x1b[K")
+
+        if output:
+            sys.stdout.write("".join(output))
+            sys.stdout.flush()
+        self._last_frame = list(frame)
+
+    def _line(self, prefix: str, text: str, content_width: int, role: str = "") -> str:
+        visible = ascii_only(text)[:content_width]
+        return prefix + colorize(visible.ljust(content_width), role)
+
+    def _body_lines(self, content_width: int, body_height: int) -> list[tuple[str, str]]:
+        if self.panel == "models":
+            lines = self._menu_lines(
+                "Model + Effort",
+                self._model_menu_entries(),
+                self.model_index,
+                lambda item: item["label"],
+            )
+        elif self.panel == "threads":
+            lines = self._menu_lines(
+                "Chat History",
+                self.threads,
+                self.thread_index,
+                lambda item: f"{item['name']} [{item['id']}]",
+            )
+        else:
+            lines = wrap_messages(self.messages, content_width)
         end = max(0, len(lines) - self.scroll)
         start = max(0, end - body_height)
-        for row, (role, line) in enumerate(lines[start:end], 1):
-            attr = curses.A_BOLD if role in {"user", "error"} else curses.A_NORMAL
-            self._put(row, 0, line, width - 1, attr)
+        return lines[start:end]
 
-        hint = " /help | PgUp/PgDn "
-        divider_width = width - 1
-        divider = ("-" * divider_width)[: max(0, divider_width - len(hint))] + hint
-        self._put(height - 2, 0, divider, divider_width, curses.A_DIM)
+    def _menu_lines(
+        self,
+        title: str,
+        items: list[Any],
+        selected: int,
+        render_item: Any,
+    ) -> list[tuple[str, str]]:
+        lines: list[tuple[str, str]] = [("info", title), ("info", "")]
+        if not items:
+            lines.append(("info", "Loading..." if self.agent.busy else "No items loaded."))
+            return lines
+        for index, item in enumerate(items):
+            marker = ">" if index == selected else " "
+            role = "assistant" if index == selected else "info"
+            lines.append((role, f"{marker} {render_item(item)}"))
+        return lines
 
+    def _model_menu_entries(self) -> list[dict[str, str]]:
+        entries: list[dict[str, str]] = []
+        for model in self.models:
+            for effort in EFFORTS:
+                selected = self.agent.model == model["id"] and self.agent.effort == effort
+                entries.append(
+                    {
+                        "kind": "combo",
+                        "value": f"{model['id']}::{effort}",
+                        "label": f"{model['id']} [{effort}]{' *' if selected else ''}",
+                    }
+                )
+        return entries
+
+    def _hint(self) -> str:
+        if self.panel == "chat":
+            return " Tab panel | PgUp/PgDn | Ctrl-P/Ctrl-N "
+        if self.panel == "models":
+            return " Tab next | Up/Down select | Enter apply "
+        return " Tab next | Up/Down select | Enter resume "
+
+    def _prompt_line(self, content_width: int) -> str:
+        if self.panel == "models":
+            return "models: pick model+effort, Enter to apply"
+        if self.panel == "threads":
+            return "threads: select with arrows, Enter to resume"
         prompt = "> "
-        available = max(1, width - len(prompt) - 1)
+        available = max(1, content_width - len(prompt))
         visible_input = ascii_only(self.input)
         visible_cursor = len(ascii_only(self.input[: self.cursor]))
         offset = max(0, visible_cursor - available + 1)
         shown = visible_input[offset : offset + available]
-        self._put(height - 1, 0, prompt + shown, width - 1)
-        cursor_x = len(prompt) + visible_cursor - offset
-        try:
-            self.screen.move(height - 1, min(cursor_x, width - 1))
-        except curses.error:
-            pass
-        self.screen.refresh()
+        cursor_at = max(0, min(available - 1, visible_cursor - offset))
+        if cursor_at >= len(shown):
+            shown = shown + "_"
+        else:
+            shown = shown[:cursor_at] + "_" + shown[cursor_at + 1 :]
+        return prompt + shown[:available]
 
-    def _put(self, y: int, x: int, text: str, limit: int, attr: int = 0) -> None:
-        try:
-            self.screen.addnstr(y, x, ascii_only(text), max(0, limit), attr)
-        except curses.error:
-            pass
-
-    def _key(self, key: int | str) -> None:
-        if key in {"\n", "\r", curses.KEY_ENTER}:
+    def _key(self, key: str) -> None:
+        if key == "\t":
+            self._cycle_panel()
+        elif key in {"\n", "\r"}:
+            if self.panel != "chat":
+                self._activate_panel_selection()
+                return
             self._submit()
-        elif key in {curses.KEY_BACKSPACE, 127, 8}:
+        elif key in {"\x7f", "\x08"}:
+            if self.panel != "chat":
+                return
             if self.cursor:
                 self.input = self.input[: self.cursor - 1] + self.input[self.cursor :]
                 self.cursor -= 1
-        elif key == curses.KEY_DC:
+        elif key == "DELETE":
+            if self.panel != "chat":
+                return
             self.input = self.input[: self.cursor] + self.input[self.cursor + 1 :]
-        elif key == curses.KEY_LEFT:
+        elif key == "LEFT":
+            if self.panel != "chat":
+                return
             self.cursor = max(0, self.cursor - 1)
-        elif key == curses.KEY_RIGHT:
+        elif key == "RIGHT":
+            if self.panel != "chat":
+                return
             self.cursor = min(len(self.input), self.cursor + 1)
-        elif key == curses.KEY_HOME:
+        elif key == "HOME":
+            if self.panel != "chat":
+                return
             self.cursor = 0
-        elif key == curses.KEY_END:
+        elif key == "END":
+            if self.panel != "chat":
+                return
             self.cursor = len(self.input)
-        elif key == curses.KEY_UP:
-            self._prompt_history(-1)
-        elif key == curses.KEY_DOWN:
-            self._prompt_history(1)
-        elif key == curses.KEY_PPAGE:
-            self.scroll += max(1, self.screen.getmaxyx()[0] - 4)
-        elif key == curses.KEY_NPAGE:
-            self.scroll = max(0, self.scroll - max(1, self.screen.getmaxyx()[0] - 4))
+        elif key == "UP":
+            if self.panel == "models":
+                self.model_index = max(0, self.model_index - 1)
+            elif self.panel == "threads":
+                self.thread_index = max(0, self.thread_index - 1)
+            else:
+                self._prompt_history(-1)
+        elif key == "DOWN":
+            if self.panel == "models":
+                self.model_index = min(
+                    max(0, len(self._model_menu_entries()) - 1),
+                    self.model_index + 1,
+                )
+            elif self.panel == "threads":
+                self.thread_index = min(max(0, len(self.threads) - 1), self.thread_index + 1)
+            else:
+                self._prompt_history(1)
+        elif key in {"PGUP", "CTRL_SEMI", "\x10"}:
+            self._scroll(1)
+        elif key in {"PGDN", "CTRL_DOT", "\x0e"}:
+            self._scroll(-1)
         elif key == "\x03":
             if not self.agent.interrupt():
                 self.running = False
@@ -271,11 +491,52 @@ class AsciiTUI:
             self.messages.clear()
             self.scroll = 0
         elif key == "\x15":
+            if self.panel != "chat":
+                return
             self.input = self.input[self.cursor :]
             self.cursor = 0
-        elif isinstance(key, str) and key.isprintable():
+        elif len(key) == 1 and key.isprintable():
+            if self.panel != "chat":
+                return
             self.input = self.input[: self.cursor] + key + self.input[self.cursor :]
             self.cursor += len(key)
+
+    def _cycle_panel(self) -> None:
+        self.panel = next_panel(self.panel)
+        self.scroll = 0
+        if self.panel == "models" and not self.models and not self.agent.busy:
+            if not self.agent.command(Command("models")):
+                self._append("error", "Busy. Use /stop first.")
+        elif self.panel == "threads" and not self.threads and not self.agent.busy:
+            if not self.agent.command(Command("threads")):
+                self._append("error", "Busy. Use /stop first.")
+
+    def _activate_panel_selection(self) -> None:
+        if self.panel == "models":
+            entries = self._model_menu_entries()
+            if not entries:
+                return
+            entry = entries[self.model_index]
+            if entry["kind"] == "combo":
+                model_id, effort = entry["value"].split("::", 1)
+                self._submit_command(Command("model", model_id))
+                self._submit_command(Command("effort", effort))
+            else:
+                self._submit_command(Command(entry["kind"], entry["value"]))
+            self.panel = "chat"
+        elif self.panel == "threads":
+            if not self.threads:
+                return
+            thread_id = self.threads[self.thread_index]["id"]
+            self._submit_command(Command("resume", thread_id))
+            self.panel = "chat"
+
+    def _scroll(self, direction: int) -> None:
+        amount = max(1, shutil.get_terminal_size((80, 24)).lines - 4)
+        if direction > 0:
+            self.scroll += amount
+        else:
+            self.scroll = max(0, self.scroll - amount)
 
     def _submit(self) -> None:
         text = self.input.strip()
@@ -328,13 +589,13 @@ class AsciiTUI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Pocket Codex ASCII v3")
+    parser = argparse.ArgumentParser(description="Pocket Codex ASCII v4")
     parser.add_argument("cwd", nargs="?", default=".", help="agent working directory")
     args = parser.parse_args()
     cwd = str(Path(args.cwd).expanduser().resolve())
     if not Path(cwd).is_dir():
         parser.error(f"not a directory: {cwd}")
-    curses.wrapper(lambda screen: AsciiTUI(screen, cwd).run())
+    AsciiTUI(cwd).run()
 
 
 if __name__ == "__main__":
