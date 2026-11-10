@@ -30,6 +30,7 @@ PREFIXES = {
     "assistant": "< ",
     "error": "! ",
     "info": "# ",
+    "activity": "  ",
 }
 
 LEFT_PAD = 4
@@ -152,10 +153,16 @@ class AsciiTUI:
         self.models: list[dict[str, Any]] = []
         self.threads: list[dict[str, str]] = []
         self.model_index = 0
+        self.effort_index = 0
+        self.pending_model: dict[str, Any] | None = None
         self.thread_index = 0
         self.resume_thread_id = resume_thread_id
         self.program_name = program_name
         self.exit_message = ""
+        self._stream_messages: dict[str, Message] = {}
+        self._stream_seen = False
+        self.working: list[Message] = []
+        self._working_active = False
 
     def run(self) -> None:
         self.agent.start()
@@ -175,7 +182,7 @@ class AsciiTUI:
         self._print_exit_message()
 
     def _drain_events(self) -> None:
-        while True:
+        for _ in range(100):
             try:
                 event = self.agent.events.get_nowait()
             except queue.Empty:
@@ -185,13 +192,37 @@ class AsciiTUI:
     def _event(self, event: Event) -> None:
         if event.kind in {"ready", "idle", "status"}:
             self.status = event.text
+            if event.kind == "status" and event.text == "thinking":
+                self._start_working()
+            elif event.kind == "idle":
+                self._working_active = False
+                self._stream_messages.clear()
+        elif event.kind in {"message_delta", "message_complete"}:
+            self._stream_seen = True
+            item_id = event.data["id"]
+            previous = self._stream_messages.get(item_id)
+            text = (previous.text if previous else "") + event.text if event.kind == "message_delta" else event.text
+            message = Message("assistant", text)
+            index = next((i for i, item in enumerate(self.messages) if item is previous), None)
+            if index is None:
+                self._append(message.role, message.text)
+                message = self.messages[-1]
+            else:
+                self.messages[index] = message
+            self._stream_messages[item_id] = message
+        elif event.kind == "activity":
+            # Tool output is text, not terminal escape sequences.
+            text = "".join(char if char in "\n\t" or ord(char) >= 32 and ord(char) != 127 else "?" for char in event.text)
+            self.working.append(Message("activity", text[-16000:]))
+            del self.working[:-200]
         elif event.kind == "answer":
-            self._append("assistant", event.text)
+            if not ((event.data or {}).get("streamed") and self._stream_seen):
+                self._append("assistant", event.text)
             self.status = "ready"
-            self.scroll = 0
         elif event.kind in {"error", "fatal"}:
             self._append("error", event.text)
             self.status = "error"
+            self._working_active = False
         elif event.kind in {"info", "config"}:
             self._append("info", event.text)
             self.scroll = 0
@@ -212,7 +243,7 @@ class AsciiTUI:
 
     def _show_models(self, models: list[dict[str, Any]]) -> None:
         self.models = models
-        self.model_index = min(self.model_index, max(0, len(self._model_menu_entries()) - 1))
+        self.model_index = min(self.model_index, max(0, len(models) - 1))
         if not models:
             if self.panel == "chat":
                 self._append("info", "No models found.")
@@ -247,10 +278,21 @@ class AsciiTUI:
             Message(str(item["role"]), str(item["text"]))
             for item in data.get("messages", [])
         ]
+        self._reset_working()
         self.messages = restored or [Message("info", "This conversation is empty.")]
         self.thread_id = str(data.get("id", self.thread_id))
         self.status = "ready"
         self.scroll = 0
+
+    def _reset_working(self) -> None:
+        self._stream_messages.clear()
+        self._stream_seen = False
+        self.working.clear()
+        self._working_active = False
+
+    def _start_working(self) -> None:
+        self._reset_working()
+        self._working_active = True
 
     def _thinking_status(self) -> str:
         if not self.agent.busy and self.status not in {"thinking", "interrupting"}:
@@ -364,9 +406,9 @@ class AsciiTUI:
     def _body_lines(self, content_width: int, body_height: int) -> list[tuple[str, str]]:
         if self.panel == "models":
             lines = self._menu_lines(
-                "Model + Effort",
+                "Choose effort" if self.pending_model else "Choose model",
                 self._model_menu_entries(),
-                self.model_index,
+                self.effort_index if self.pending_model else self.model_index,
                 lambda item: item["label"],
             )
         elif self.panel == "threads":
@@ -376,11 +418,37 @@ class AsciiTUI:
                 self.thread_index,
                 lambda item: f"{item['name']} [{item['id']}]",
             )
+        elif self.panel == "working":
+            lines = [("info", "Working log (Ctrl-W back)")] + wrap_messages(self.working, content_width)
         else:
             lines = wrap_messages(self.messages, content_width)
+        if self.panel in {"models", "threads"}:
+            selected = (self.effort_index if self.pending_model else self.model_index) if self.panel == "models" else self.thread_index
+            # Keep the title and scroll the item viewport around the selection.
+            if body_height <= 1:
+                return lines[2 + selected:3 + selected] or lines[:1]
+            capacity = max(1, body_height - 1)
+            items = lines[2:]
+            start = min(max(0, selected - capacity + 1), max(0, len(items) - capacity))
+            return lines[:1] + items[start:start + capacity]
+        footer: list[tuple[str, str]] = []
+        if self.panel == "chat" and (self._working_active or self.working):
+            label = "Working" if self._working_active else "Working done"
+            activity = wrap_messages(self.working, content_width)
+            activity = [row for row in activity if row[1].strip()]
+            if body_height <= 4:
+                detail = activity[-1][1].strip() if activity else "waiting for SDK..."
+                footer = [("info", f"{label}: {detail}")]
+            else:
+                footer = [("info", f"[{label}] Ctrl-W log")]
+                footer += activity[-2:] or [("info", "Waiting for SDK events...")]
+        available = max(1, body_height - len(footer))
         end = max(0, len(lines) - self.scroll)
-        start = max(0, end - body_height)
-        return lines[start:end]
+        start = max(0, end - available)
+        visible = lines[start:end]
+        if footer:
+            visible += [("info", "")] * max(0, available - len(visible))
+        return (visible + footer)[:body_height]
 
     def _menu_lines(
         self,
@@ -400,29 +468,31 @@ class AsciiTUI:
         return lines
 
     def _model_menu_entries(self) -> list[dict[str, str]]:
-        entries: list[dict[str, str]] = []
-        for model in self.models:
-            for effort in EFFORTS:
-                selected = self.agent.model == model["id"] and self.agent.effort == effort
-                entries.append(
-                    {
-                        "kind": "combo",
-                        "value": f"{model['id']}::{effort}",
-                        "label": f"{model['id']} [{effort}]{' *' if selected else ''}",
-                    }
-                )
-        return entries
+        if self.pending_model is not None:
+            model = self.pending_model
+            efforts = model.get("efforts") or list(EFFORTS)
+            return [
+                {"kind": "combo", "value": f"{model['id']}::{effort}", "label": effort}
+                for effort in efforts
+            ]
+        return [
+            {"kind": "model", "value": model["id"],
+             "label": f"{model['id']}{' *' if self.agent.model == model['id'] else ''}"}
+            for model in self.models
+        ]
 
     def _hint(self) -> str:
         if self.panel == "chat":
-            return " Tab panel | PgUp/PgDn | Ctrl-P/Ctrl-N "
+            return " Tab panels | Ctrl-W log | PgUp/PgDn "
         if self.panel == "models":
             return " Tab next | Up/Down select | Enter apply "
         return " Tab next | Up/Down select | Enter resume "
 
     def _prompt_line(self, content_width: int) -> str:
+        if self.panel == "working":
+            return "Working log: PgUp/PgDn, Ctrl-W back"
         if self.panel == "models":
-            return "models: pick model+effort, Enter to apply"
+            return "effort: Enter apply, Esc back" if self.pending_model else "model: arrows, Enter next"
         if self.panel == "threads":
             return "threads: select with arrows, Enter to resume"
         prompt = "> "
@@ -439,7 +509,10 @@ class AsciiTUI:
         return prompt + shown[:available]
 
     def _key(self, key: str) -> None:
-        if key == "\t":
+        if key == "\x17":
+            self.panel = "chat" if self.panel == "working" else "working"
+            self.scroll = 0
+        elif key == "\t":
             self._cycle_panel()
         elif key in {"\n", "\r"}:
             if self.panel != "chat":
@@ -456,6 +529,11 @@ class AsciiTUI:
             if self.panel != "chat":
                 return
             self.input = self.input[: self.cursor] + self.input[self.cursor + 1 :]
+        elif key in {"ESC", "\x1b"} and self.panel == "models":
+            if self.pending_model is not None:
+                self.pending_model = None
+            else:
+                self.panel = "chat"
         elif key == "LEFT":
             if self.panel != "chat":
                 return
@@ -474,17 +552,14 @@ class AsciiTUI:
             self.cursor = len(self.input)
         elif key == "UP":
             if self.panel == "models":
-                self.model_index = max(0, self.model_index - 1)
+                self._move_model_selection(-1)
             elif self.panel == "threads":
                 self.thread_index = max(0, self.thread_index - 1)
             else:
                 self._prompt_history(-1)
         elif key == "DOWN":
             if self.panel == "models":
-                self.model_index = min(
-                    max(0, len(self._model_menu_entries()) - 1),
-                    self.model_index + 1,
-                )
+                self._move_model_selection(1)
             elif self.panel == "threads":
                 self.thread_index = min(max(0, len(self.threads) - 1), self.thread_index + 1)
             else:
@@ -498,6 +573,7 @@ class AsciiTUI:
                 self._request_exit()
         elif key == "\x0c":
             self.messages.clear()
+            self._reset_working()
             self.scroll = 0
         elif key == "\x15":
             if self.panel != "chat":
@@ -511,6 +587,7 @@ class AsciiTUI:
             self.cursor += len(key)
 
     def _cycle_panel(self) -> None:
+        self.pending_model = None
         self.panel = next_panel(self.panel)
         self.scroll = 0
         if self.panel == "models" and not self.models and not self.agent.busy:
@@ -525,13 +602,18 @@ class AsciiTUI:
             entries = self._model_menu_entries()
             if not entries:
                 return
-            entry = entries[self.model_index]
-            if entry["kind"] == "combo":
-                model_id, effort = entry["value"].split("::", 1)
-                self._submit_command(Command("model", model_id))
-                self._submit_command(Command("effort", effort))
-            else:
-                self._submit_command(Command(entry["kind"], entry["value"]))
+            index = self.effort_index if self.pending_model else self.model_index
+            entry = entries[index]
+            if self.pending_model is None:
+                self.pending_model = self.models[self.model_index]
+                efforts = self.pending_model.get("efforts") or list(EFFORTS)
+                preferred = self.agent.effort if self.agent.effort in efforts else self.pending_model.get("default_effort")
+                self.effort_index = efforts.index(preferred) if preferred in efforts else 0
+                return
+            if not self.agent.command(Command("model_effort", entry["value"])):
+                self.status = "Busy. Use /stop first."
+                return
+            self.pending_model = None
             self.panel = "chat"
         elif self.panel == "threads":
             if not self.threads:
@@ -540,8 +622,21 @@ class AsciiTUI:
             self._submit_command(Command("resume", thread_id))
             self.panel = "chat"
 
+    def _move_model_selection(self, delta: int) -> None:
+        limit = max(0, len(self._model_menu_entries()) - 1)
+        if self.pending_model is not None:
+            self.effort_index = min(limit, max(0, self.effort_index + delta))
+        else:
+            self.model_index = min(limit, max(0, self.model_index + delta))
+
     def _scroll(self, direction: int) -> None:
         amount = max(1, shutil.get_terminal_size((80, 24)).lines - 4)
+        if self.panel == "models":
+            self._move_model_selection(-amount if direction > 0 else amount)
+            return
+        if self.panel == "threads":
+            self.thread_index = min(max(0, len(self.threads) - 1), max(0, self.thread_index + (-amount if direction > 0 else amount)))
+            return
         if direction > 0:
             self.scroll += amount
         else:
@@ -555,18 +650,23 @@ class AsciiTUI:
         text = self.input.strip()
         if not text:
             return
-        self.input = ""
-        self.cursor = 0
-        self.prompt_history.append(text)
-        self.history_index = len(self.prompt_history)
         command = parse_command(text)
         if command:
+            self.input = ""
+            self.cursor = 0
+            self.prompt_history.append(text)
+            self.history_index = len(self.prompt_history)
             self._submit_command(command)
             return
         if not self.agent.ask(text):
             self._append("error", "Busy. Use /stop first.")
             return
+        self.input = ""
+        self.cursor = 0
+        self.prompt_history.append(text)
+        self.history_index = len(self.prompt_history)
         self._append("user", text)
+        self._start_working()
         self.status = "thinking"
         self.scroll = 0
 
@@ -577,6 +677,7 @@ class AsciiTUI:
             self._append("info", HELP)
         elif command.name == "clear":
             self.messages.clear()
+            self._reset_working()
         elif command.name == "quit":
             self.running = False
         elif command.name == "stop":

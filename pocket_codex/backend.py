@@ -135,13 +135,54 @@ class CodexWorker:
         if self.model:
             kwargs["model"] = self.model
         self._active_turn = thread.turn(prompt, **kwargs)
-        result = self._active_turn.run()
-        if result.final_response:
-            self.events.put(Event("answer", result.final_response))
-        elif result.error:
-            self.events.put(Event("error", str(result.error)))
-        else:
-            self.events.put(Event("status", f"turn ended: {result.status}"))
+        messages: dict[str, dict[str, str]] = {}
+        completed = False
+        for notification in self._active_turn.stream():
+            method = notification.method
+            payload = notification.payload
+            if method == "item/agentMessage/delta":
+                item_id = str(_value(payload, "item_id", "itemId"))
+                message = messages.setdefault(item_id, {"text": "", "phase": ""})
+                delta = str(_value(payload, "delta", default=""))
+                message["text"] += delta
+                self.events.put(Event("message_delta", delta, {"id": item_id}))
+            elif method in {"item/started", "item/completed"}:
+                item = _value(payload, "item")
+                item = _value(item, "root", default=item)
+                kind = _value(item, "type")
+                item_id = str(_value(item, "id"))
+                if kind == "agentMessage":
+                    message = messages.setdefault(item_id, {"text": "", "phase": ""})
+                    phase = _value(item, "phase", default="")
+                    message["phase"] = str(_value(phase, "value", default=phase))
+                    if method == "item/completed":
+                        message["text"] = str(_value(item, "text", default=message["text"]))
+                        self.events.put(Event("message_complete", message["text"], {"id": item_id}))
+                else:
+                    activity = _activity(item)
+                    if activity:
+                        state = "Started" if method == "item/started" else "Finished"
+                        self.events.put(Event("activity", f"{state}: {activity}"))
+            elif method in {"item/commandExecution/outputDelta", "item/fileChange/outputDelta"}:
+                self.events.put(Event("activity", str(_value(payload, "delta", default=""))))
+            elif method == "item/mcpToolCall/progress":
+                self.events.put(Event("activity", str(_value(payload, "message", default="Tool working..."))))
+            elif method == "turn/completed":
+                completed = True
+                turn = _value(payload, "turn")
+                error = _value(turn, "error")
+                status = _value(turn, "status", default="unknown")
+                status = _value(status, "value", default=status)
+                if error:
+                    self.events.put(Event("error", str(_value(error, "message", default=error))))
+                elif status != "completed":
+                    self.events.put(Event("status", f"turn ended: {status}"))
+        if not completed:
+            raise RuntimeError("Turn stream ended without a completion event")
+        finals = [m["text"] for m in messages.values() if m["phase"] in {"final_answer", ""}]
+        if finals:
+            # Keep the final-answer event for the ASCII client; Textual reconciles by item id.
+            self.events.put(Event("answer", finals[-1], {"streamed": True}))
 
     def _command(self, command: Command) -> None:
         handler = getattr(self, f"_cmd_{command.name}", None)
@@ -207,24 +248,39 @@ class CodexWorker:
         self.model = model
         self.events.put(Event("config", f"model={model}"))
 
+    def _cmd_model_effort(self, value: str) -> None:
+        model, separator, effort = value.rpartition("::")
+        if not separator or not model or effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("Invalid model and effort selection")
+        self.model = model
+        self.effort = effort
+        self.events.put(Event("config", f"model={model} effort={effort}"))
+
     def _cmd_models(self, _: str) -> None:
         response = self._client.models()
         rows = _items(response, "data", "models", "items")
         models = []
         for row in rows:
-            model_id = str(_value(row, "id", "model", "slug", default=row))
+            model_id = str(_value(row, "model", "id", "slug", default=row))
+            default_effort = _value(row, "default_reasoning_effort", "defaultReasoningEffort", default="medium")
             models.append(
                 {
                     "id": model_id,
                     "name": str(_value(row, "display_name", default=model_id)),
                     "default": bool(_value(row, "is_default", default=False)),
+                    "efforts": [
+                        str(_value(effort, "value", default=effort))
+                        for option in _items(row, "supported_reasoning_efforts", "supportedReasoningEfforts")
+                        if (effort := _value(option, "reasoning_effort", "reasoningEffort")) is not None
+                    ],
+                    "default_effort": str(_value(default_effort, "value", default=default_effort)),
                 }
             )
         self.events.put(Event("models", data=models))
 
     def _cmd_effort(self, effort: str) -> None:
-        if effort not in {"low", "medium", "high"}:
-            raise ValueError("Usage: /effort low|medium|high")
+        if effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("Usage: /effort none|minimal|low|medium|high|xhigh")
         self.effort = effort
         self.events.put(Event("config", f"effort={effort}"))
 
@@ -293,3 +349,21 @@ def _history_messages(response: Any) -> list[dict[str, str]]:
                 if phase.endswith("final_answer") and text:
                     messages.append({"role": "assistant", "text": str(text)})
     return messages
+
+
+def _activity(item: Any) -> str:
+    kind = _value(item, "type")
+    if kind == "commandExecution":
+        status = _value(item, "status", default="")
+        status = _value(status, "value", default=status)
+        exit_code = _value(item, "exit_code", "exitCode")
+        suffix = f" (exit {exit_code})" if exit_code is not None else f" ({status})"
+        return str(_value(item, "command", default="Command")) + suffix
+    if kind == "fileChange":
+        paths = [str(_value(change, "path", default="?")) for change in _items(item, "changes")]
+        return "Files: " + ", ".join(paths)
+    if kind == "mcpToolCall":
+        return f"Tool: {_value(item, 'server', default='')} / {_value(item, 'tool', default='')}"
+    if kind == "webSearch":
+        return f"Search: {_value(item, 'query', default='')}"
+    return ""

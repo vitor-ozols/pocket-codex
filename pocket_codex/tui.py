@@ -10,7 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, ListItem, ListView, Markdown, Select, Static, TextArea
+from textual.widgets import Button, ListItem, ListView, Markdown, RichLog, Select, Static, TextArea
 
 from .backend import CodexWorker, Event as BackendEvent
 from .commands import HELP, LOCAL_COMMANDS, is_known, parse_command
@@ -255,6 +255,9 @@ class PocketCodexApp(App[None]):
         padding: 0;
     }
 
+    #working-label { height: 1; color: #68b5a5; margin: 0 3; }
+    #working { height: 6; margin: 0 2; background: #14211f; }
+
     #thinking {
         height: 2;
         margin: 0 3;
@@ -341,7 +344,7 @@ class PocketCodexApp(App[None]):
         self._current_thread: str | None = None
         self._refresh_threads_on_idle = False
         self._request_threads_on_idle = False
-        self._ignore_model_value: str | None = None
+        self._stream_messages: dict[str, ChatBubble] = {}
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="shell"):
@@ -366,6 +369,8 @@ class PocketCodexApp(App[None]):
                     ),
                     id="chat",
                 )
+                yield Static("WORKING", id="working-label", classes="hidden")
+                yield RichLog(id="working", max_lines=500, wrap=True, markup=False, classes="hidden")
                 yield Thinking()
                 with Horizontal(id="composer-bar"):
                     yield Composer(
@@ -394,7 +399,7 @@ class PocketCodexApp(App[None]):
             self.screen.remove_class("sidebar-open")
 
     async def _poll_backend(self) -> None:
-        while True:
+        for _ in range(100):
             try:
                 event = self.agent.events.get_nowait()
             except queue.Empty:
@@ -411,13 +416,29 @@ class PocketCodexApp(App[None]):
                 self.query_one(Thinking).show()
         elif event.kind == "idle":
             self._set_status("READY")
+            self._stream_messages.clear()
             self.query_one(Thinking).hide()
             if self._refresh_threads_on_idle or self._request_threads_on_idle:
                 self._refresh_threads_on_idle = False
                 self._request_threads_on_idle = False
                 self.agent.command(_command("threads"))
+        elif event.kind in {"message_delta", "message_complete"}:
+            item_id = event.data["id"]
+            bubble = self._stream_messages.get(item_id)
+            if bubble is None:
+                bubble = await self._add_message("assistant", "")
+                self._stream_messages[item_id] = bubble
+            bubble.text = bubble.text + event.text if event.kind == "message_delta" else event.text
+            await bubble.query_one(Markdown).update(bubble.text)
+            self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
+        elif event.kind == "activity":
+            self.query_one("#working-label").remove_class("hidden")
+            log = self.query_one("#working", RichLog)
+            log.remove_class("hidden")
+            log.write(event.text)
         elif event.kind == "answer":
-            await self._add_message("assistant", event.text)
+            if not (event.data or {}).get("streamed"):
+                await self._add_message("assistant", event.text)
             self._refresh_threads_on_idle = True
         elif event.kind in {"error", "fatal"}:
             self.query_one(Thinking).hide()
@@ -443,15 +464,16 @@ class PocketCodexApp(App[None]):
     def _load_models(self, models: list[dict[str, Any]]) -> None:
         select = self.query_one("#model-select", Select)
         options = [(model["name"], model["id"]) for model in models]
-        select.set_options(options)
+        with select.prevent(Select.Changed):
+            select.set_options(options)
         current = self.agent.model
         default = next((model["id"] for model in models if model["default"]), None)
         selected = current if current and any(
             model["id"] == current for model in models
         ) else default
         if selected:
-            self._ignore_model_value = selected
-            select.value = selected
+            with select.prevent(Select.Changed):
+                select.value = selected
 
     async def _load_threads(self, threads: list[dict[str, str]]) -> None:
         view = self.query_one("#thread-list", ListView)
@@ -471,28 +493,35 @@ class PocketCodexApp(App[None]):
 
     async def _clear_chat(self) -> None:
         chat = self.query_one("#chat", VerticalScroll)
+        self._stream_messages.clear()
+        self.query_one("#working", RichLog).clear()
+        self.query_one("#working").add_class("hidden")
+        self.query_one("#working-label").add_class("hidden")
         await chat.remove_children()
 
-    async def _add_message(self, role: str, text: str, *, scroll: bool = True) -> None:
+    async def _add_message(self, role: str, text: str, *, scroll: bool = True) -> ChatBubble:
         chat = self.query_one("#chat", VerticalScroll)
         welcome = chat.query("#welcome")
         if welcome:
             await welcome.remove()
-        await chat.mount(ChatBubble(role, text))
+        bubble = ChatBubble(role, text)
+        await chat.mount(bubble)
         if scroll:
             chat.scroll_end(animate=False)
+        return bubble
 
-    async def _send_text(self, text: str) -> None:
+    async def _send_text(self, text: str) -> bool:
         command = parse_command(text)
         if command is not None:
             await self._run_command(command)
-            return
+            return True
         if not self.agent.ask(text):
             self.notify("Codex is busy. Press Ctrl+C to stop.", severity="warning")
-            return
+            return False
         await self._add_message("user", text)
         self.query_one(Thinking).show()
         self._set_status("THINKING")
+        return True
 
     async def _run_command(self, command: Any) -> None:
         if not is_known(command):
@@ -512,7 +541,8 @@ class PocketCodexApp(App[None]):
     async def submit_prompt(self, event: Composer.Submitted) -> None:
         composer = self.query_one("#prompt", Composer)
         composer.load_text("")
-        await self._send_text(event.text)
+        if not await self._send_text(event.text):
+            composer.load_text(event.text)
 
     @on(Button.Pressed, "#send")
     async def send_button(self) -> None:
@@ -520,7 +550,8 @@ class PocketCodexApp(App[None]):
         text = composer.text.strip()
         if text:
             composer.load_text("")
-            await self._send_text(text)
+            if not await self._send_text(text):
+                composer.load_text(text)
 
     @on(Button.Pressed, "#new-chat")
     async def new_chat_button(self) -> None:
@@ -534,12 +565,11 @@ class PocketCodexApp(App[None]):
     def model_changed(self, event: Select.Changed) -> None:
         if event.value is Select.NULL:
             return
-        if event.value == self._ignore_model_value:
-            self._ignore_model_value = None
-            return
         if event.value == self.agent.model:
             return
         if not self.agent.command(_command("model", str(event.value))):
+            with event.select.prevent(Select.Changed):
+                event.select.value = self.agent.model or Select.NULL
             self.notify("Change the model after the current turn.", severity="warning")
 
     @on(ListView.Selected, "#thread-list")
@@ -575,7 +605,13 @@ class PocketCodexApp(App[None]):
 
     def action_switch_panel(self) -> None:
         if self.screen.has_class("narrow"):
-            self.action_toggle_sidebar()
+            if not self.screen.has_class("sidebar-open"):
+                self.screen.add_class("sidebar-open")
+                self.query_one("#model-select", Select).focus()
+            elif isinstance(self.focused, ListView):
+                self.action_close_sidebar()
+            else:
+                self.screen.focus_next()
         else:
             self.screen.focus_next()
 

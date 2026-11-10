@@ -23,6 +23,7 @@ REMOTE_COMMANDS = {
     "compact",
     "effort",
     "model",
+    "model_effort",
     "models",
     "name",
     "new",
